@@ -1,0 +1,55 @@
+{
+  "space_id": "924e12ad-e3bd-4a63-81d0-4523341ae249",
+  "created_at": "2026-09-22T10:26:25.393593+00:00",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "c001",
+      "question": "What are the specific responsibilities of Northwind Systems Inc. when handling user information?",
+      "gold_quote": "Processor shall process Customer Personal Data only on documented instructions from Controller, including with regard to transfers to a third country, unless required to do so by law to which the Processor is subject.",
+      "document": "DPA-Northwind.pdf"
+    },
+    {
+      "id": "c002",
+      "question": "How much time does the Controller have to contest the hiring of a new third-party data handler?",
+      "gold_quote": "Processor may engage Sub-processors provided it gives Controller at least thirty (30) days' notice of any intended addition or replacement, during which Controller may object on reasonable grounds relating to data protection.",
+      "document": "DPA-Northwind.pdf"
+    },
+    {
+      "id": "c003",
+      "question": "What is the maximum amount of time the processor has to inform the controller about a security breach involving customer information?",
+      "gold_quote": "Processor shall notify Controller without undue delay, and in any event within seventy-two (72) hours, after becoming aware of a Personal Data Breach affecting Customer Personal Data.",
+      "document": "DPA-Northwind.pdf"
+    },
+    {
+      "id": "c004",
+      "question": "What is the deadline for the Processor to handle Customer Data once the main contract ends?",
+      "gold_quote": "Upon expiry or termination of the Principal Agreement, Processor shall, within thirty (30) days, return or securely destroy all Customer Data and certify such destruction in writing, save to the extent retention is required by applicable law.",
+      "document": "DPA-Northwind.pdf"
+    },
+    {
+      "id": "c005",
+      "question": "How are the people who are officially allowed to access the software defined?",
+      "gold_quote": "\"Authorised User\" means an individual employee or contractor of Customer whom Customer permits to use the Services.",
+      "document": "MSA-Northwind-2025.pdf"
+    },
+    {
+      "id": "c006",
+      "question": "What is the penalty for failing to pay the service charges by the deadline?",
+      "gold_quote": "Late amounts accrue interest at 1.5% per month or the maximum rate permitted by law, whichever is lower.",
+      "document": "MSA-Northwind-2025.pdf"
+    },
+    {
+      "id": "c007",
+      "question": "What is the penalty if the company fails to maintain their promised uptime for a monthly period?",
+      "gold_quote": "If availability falls below 99.9% in any calendar month, Customer is entitled to a service credit of 10% of that month's fee, and to 25% if availability falls below 99.0%.",
+      "document": "MSA-Northwind-2025.pdf"
+    },
+    {
+      "id": "c008",
+      "question": "Are there any situations where the liability limitations in this contract do not apply?",
+      "gold_quote": "Nothing in this Section shall operate to limit or exclude either party's liability for fraud, fraudulent misrepresentation, death or personal injury caused by negligence, or any other liability which cannot lawfully be limited.",
+      "document": "MSA-Northwind-2025.pdf"
+    }
+  ]
+}

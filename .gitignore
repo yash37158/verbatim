@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+
+# Secrets — also ignored in api/ and web/, repeated here so a new subdirectory
+# cannot leak one by omission.
+.env
+.env.*
+!.env.example

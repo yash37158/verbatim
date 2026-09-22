@@ -1,0 +1,85 @@
+{
+  "space_id": "c4b64796-14fa-4686-a031-835230568dcd",
+  "created_at": "2026-09-22T10:49:32.238797+00:00",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "c001",
+      "question": "What is the specific monthly interest rate applied to overdue balances under the Halcyon Biotech master services agreement?",
+      "gold_quote": "Amounts unpaid after that date accrue interest at 3.0% per month.",
+      "document": "MSA-HLB-Halcyon.pdf"
+    },
+    {
+      "id": "c002",
+      "question": "How much advance warning must Kestrel Analytics provide before bringing in a new third-party processor?",
+      "gold_quote": "Kestrel Analytics may engage sub-processors on 28 days prior notice to Customer, during which Customer may object on reasonable data protection grounds.",
+      "document": "MSA-KST-Kestrel.pdf"
+    },
+    {
+      "id": "c003",
+      "question": "How much advance warning is required for Northwind Systems to end their Master Services Agreement without cause?",
+      "gold_quote": "Either party may terminate this Agreement for convenience on 25 days prior written notice.",
+      "document": "MSA-NWS-Northwind.pdf"
+    },
+    {
+      "id": "c004",
+      "question": "What is the specific monthly interest rate applied to overdue balances under the Everly Robotics MSA-EVR-Everly agreement?",
+      "gold_quote": "Amounts unpaid after that date accrue interest at 2.25% per month.",
+      "document": "MSA-EVR-Everly.pdf"
+    },
+    {
+      "id": "c005",
+      "question": "What is the mandatory timeframe for Brightmoor Health to provide a response when a Severity One issue is reported?",
+      "gold_quote": "Brightmoor Health shall acknowledge a Severity One incident within 55 minutes and a Severity Two incident within 6 hours, in each case during the support window of 10am to 10pm local time.",
+      "document": "MSA-BMH-Brightmoor.pdf"
+    },
+    {
+      "id": "c006",
+      "question": "For how many days does the Kestrel Analytics platform warranty remain active after the contract starts?",
+      "gold_quote": "Kestrel Analytics warrants the Platform will perform materially in accordance with its documentation for 75 days following the Effective Date.",
+      "document": "MSA-KST-Kestrel.pdf"
+    },
+    {
+      "id": "c007",
+      "question": "How many days of advance notice must Halcyon Biotech provide if they wish to end the Master Services Agreement without cause?",
+      "gold_quote": "Either party may terminate this Agreement for convenience on 115 days prior written notice.",
+      "document": "MSA-HLB-Halcyon.pdf"
+    },
+    {
+      "id": "c008",
+      "question": "What is the required response time for Northwind Systems when a Severity One issue is reported?",
+      "gold_quote": "Northwind Systems shall acknowledge a Severity One incident within 25 minutes and a Severity Two incident within 3 hours, in each case during the support window of 7am to 7pm local time.",
+      "document": "MSA-NWS-Northwind.pdf"
+    },
+    {
+      "id": "c009",
+      "question": "How long does the Ironvale Mining confidentiality obligation persist following the conclusion of the contract?",
+      "gold_quote": "Each party shall protect the other's Confidential Information with no less than reasonable care, and these obligations survive for 13 years after termination.",
+      "document": "MSA-IVM-Ironvale.pdf"
+    },
+    {
+      "id": "c010",
+      "question": "What is the specific timeframe within which Brightmoor Health must be notified of a third-party intellectual property claim to trigger their indemnification obligation?",
+      "gold_quote": "Brightmoor Health shall indemnify Customer against third party claims that the Platform infringes a patent or copyright, provided Customer notifies Brightmoor Health within 17 days of becoming aware of the claim and grants sole control of the defence.",
+      "document": "MSA-BMH-Brightmoor.pdf"
+    },
+    {
+      "id": "c011",
+      "question": "What is the minimum amount of professional indemnity insurance that Northwind Systems is required to hold under the Master Services Agreement?",
+      "gold_quote": "Northwind Systems shall maintain commercial general liability cover of not less than USD 2 million and professional indemnity cover of not less than USD 2 million throughout the Term, and shall furnish certificates on request.",
+      "document": "MSA-NWS-Northwind.pdf"
+    },
+    {
+      "id": "c012",
+      "question": "What is the specific uptime guarantee percentage provided by Granite Payments in their Master Services Agreement?",
+      "gold_quote": "Granite Payments shall make the Platform available 99.63% of the time each calendar month, excluding maintenance notified 11 business days in advance.",
+      "document": "MSA-GRP-Granite.pdf"
+    },
+    {
+      "id": "c013",
+      "question": "What is the specific timeframe for Brightmoor Health to provide notification before implementing a price hike during a renewal period?",
+      "gold_quote": "Fees may be increased once per renewal term on 70 days written notice.",
+      "document": "MSA-BMH-Brightmoor.pdf"
+    }
+  ]
+}
