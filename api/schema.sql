@@ -80,7 +80,10 @@ create table if not exists chunks (
   char_start  int  not null,
   char_end    int  not null,
   text        text not null,
-  embedding   vector(1536) not null,
+  -- Nullable on purpose. Chunks land the moment parsing finishes, with the keyword index
+  -- ready immediately; embeddings are filled in behind. A document is searchable in
+  -- seconds instead of after every embedding request has cleared the rate limit.
+  embedding   vector(1536),
   tsv         tsvector generated always as (to_tsvector('english', text)) stored
 );
 create index if not exists chunks_embedding_idx on chunks
@@ -88,6 +91,8 @@ create index if not exists chunks_embedding_idx on chunks
 create index if not exists chunks_tsv_idx on chunks using gin (tsv);
 create index if not exists chunks_space_idx on chunks (space_id);
 create index if not exists chunks_document_idx on chunks (document_id);
+-- The backfill worker's work list: which documents still have chunks to embed.
+create index if not exists chunks_unembedded_idx on chunks (document_id) where embedding is null;
 
 create table if not exists conversations (
   id         uuid primary key default gen_random_uuid(),

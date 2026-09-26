@@ -64,6 +64,16 @@ export function DocumentsPane({
                     <StatusPill status={doc.status} />
                     <span aria-hidden>·</span>
                     <span>{doc.page_count ? `${doc.page_count} pp` : formatBytes(doc.size_bytes)}</span>
+                    {doc.status === "ready" &&
+                      doc.total_chunks != null &&
+                      doc.indexed_chunks != null &&
+                      doc.indexed_chunks < doc.total_chunks && (
+                        // Searchable already — by wording. Meaning-based search widens as
+                        // vectors land. Say so, rather than showing a bar the user must wait on.
+                        <span className="text-warn" title="Keyword search works now; semantic search improves as sections are embedded">
+                          · semantic {doc.indexed_chunks}/{doc.total_chunks}
+                        </span>
+                      )}
                   </span>
                   {doc.error && (
                     <span className="mt-1 block pl-5">

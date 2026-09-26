@@ -92,7 +92,8 @@ not cover, declined rather than guessed at.
 
 **1 · Upload.** PDF, Word, text or Markdown. Each file is split into overlapping passages,
 and every passage remembers the page it came from — which is what makes a citation possible
-later.
+later. The document is **searchable within seconds**: the keyword index needs no embeddings,
+so those are filled in behind while you start asking.
 
 **2 · Indexed two ways.** Every passage is embedded for *meaning* and indexed for *exact
 wording*, then the two rankings are fused. Meaning alone misses `INV-90210`; wording alone
@@ -233,9 +234,9 @@ rather than glossed over.
 
 | | |
 |---|---|
-| ✅ Done | Ingestion, hybrid retrieval, agentic search, verified citations, honest abstention, Google sign-in, per-user Spaces, evals |
+| ✅ Done | Ingestion, hybrid retrieval, agentic search, verified citations, honest abstention, Google sign-in, per-user Spaces, chat history, evals |
 | ⚠️ Missing for production | Rate limiting, row-level security, object storage (files are on local disk), Dockerfile/CI, database migrations, observability, hard delete for GDPR erasure |
-| 🔜 Next | Chat history in the UI, Space rename and delete |
+| 🔜 Next | Space rename and delete from the UI |
 
 Full detail: **[FRONTEND.md](FRONTEND.md)** for planned work,
 **[api/README.md](api/README.md)** for limits, known gaps and deliberate departures from

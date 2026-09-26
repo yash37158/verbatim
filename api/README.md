@@ -33,8 +33,17 @@ and everything cascades.
 
 ### 1 · Ingest — [`chunking.py`](app/chunking.py), [`ingest.py`](app/ingest.py)
 
-`parse → chunk → embed → index`, run by a worker that claims jobs out of the `documents`
-table with `for update skip locked`. That table *is* the queue: no broker, no scheduler,
+`parse → chunk → index` first, `embed` second, and that ordering is the whole story.
+
+Parsing and chunking a 60-page PDF takes about four seconds and needs no network. The
+keyword index is a generated column, so the moment the chunks commit the document is
+**fully searchable by exact wording** — status `ready`, usable, seconds after upload.
+Embedding is slow and rate limited, so it runs as a separate backfill (`embed_pending`),
+one batch per commit, and the semantic arm simply grows as vectors land. The UI shows
+`ready · semantic 34/91` for a document in that state. A throttled embedding API no longer
+holds a new upload hostage; it just means meaning-based search widens a little more slowly.
+
+Jobs are claimed out of the `documents` table with `for update skip locked`. That table *is* the queue: no broker, no scheduler,
 no second thing to operate, and a worker that dies mid-job releases its row when the lock
 goes stale. `RUN_WORKER=false` on the API plus `python -m app.ingest` in its own process
 is how this scales out.
@@ -80,7 +89,9 @@ viewer's timezone next to the progress banked so far:
 
 ### 2 · Retrieve — [`retrieval.py`](app/retrieval.py)
 
-Hybrid, in one SQL statement:
+Hybrid, in one SQL statement, and **never blocked by the embedding API**: if embedding the
+query is refused (429, 503), search runs on the keyword arm alone rather than failing. A
+rate limit on one provider is not a reason to give the user no answer.
 
 - **dense** — `embedding <=> query` over an HNSW index, top 20
 - **sparse** — `ts_rank_cd` over a GIN index on `tsvector`, top 20
@@ -102,16 +113,19 @@ projections; mixing them costs recall.
 
 ### 3 · Answer — [`agent.py`](app/agent.py), [`grounding.py`](app/grounding.py)
 
-Two phases, because they want different things from the model.
+One streamed turn per round. The model holds one tool, `search_documents(query)`, and each
+turn either calls it — which becomes a search and another round — or produces text, which
+*is* the answer, streamed as it arrives. Capped at four searches, after which the tool is
+withheld and it must answer.
 
-**Phase 1 — the tool loop.** One tool, `search_documents(query)`. The model is told to
-search with the document's likely wording rather than the user's, to search again when a
-result comes back thin, and to run one search per clause of a multi-part question. It
-replies `READY` when it has enough. Capped at four rounds. Search runs on a
-tenant-scoped connection and is logged, which is why the loop is driven here rather than
-by the SDK's automatic function calling.
+This used to be three calls: a turn that decides to search, a turn that says `READY`, and a
+fresh call to write the answer. The `READY` turn was a full model call that produced nothing,
+and on the free tier that was a third of the 26-second median. Now the decision that it has
+enough and the answer are the same tokens. Two searches requested in one turn run
+concurrently, so a two-part question costs one wait rather than two.
 
-**Phase 2 — the answer**, streamed, with inline markers:
+Search runs on a tenant-scoped connection and is logged, which is why the loop is driven
+here rather than by the SDK's automatic function calling. The answer carries inline markers:
 
 ```
 Either party may terminate on thirty days notice.[[<chunk_id>|thirty (30) days’ prior written notice]]

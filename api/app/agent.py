@@ -14,6 +14,7 @@ Markers are parsed out of the stream as they close, the quote is checked against
 passage it cites, and what the user sees is the document's own wording. See grounding.py.
 """
 
+import asyncio
 import re
 import time
 from collections.abc import AsyncIterator
@@ -24,7 +25,7 @@ import asyncpg
 from google.genai import types
 
 from .config import settings
-from .gemini import generate, stream
+from .gemini import stream
 from .grounding import locate
 from .retrieval import Passage, format_passages, search
 
@@ -54,22 +55,17 @@ SEARCH_TOOL = types.Tool(
     ]
 )
 
-SEARCH_SYSTEM = """You are researching a question inside a user's own document library.
+SYSTEM = """You answer questions about a user's own document library, citing the documents.
 
-You have one tool: search_documents. Use it before answering anything.
+You have one tool: search_documents. Use it before answering anything. Call it with no
+preamble — do not write text and then call the tool in the same turn.
 
 - Search with the document's likely wording, not the user's. Someone asking how to "get out
   of the contract" is looking for a clause that says "termination".
-- If a search returns nothing useful, search again with different terms.
-- A question with several parts needs several searches - one per part.
-- You may search up to {rounds} times in total.
+- If a search returns nothing useful, search again with different terms. A question with
+  several parts needs several searches - one per part. You may search up to {rounds} times.
 
-When you have what you need, or you are satisfied the documents do not cover the question,
-reply with exactly: READY
-
-Do not write the answer yet."""
-
-ANSWER_SYSTEM = """Answer using only the passages returned by your searches.
+When you have what you need, write the answer. Use only the passages your searches returned.
 
 After each sentence that asserts a fact from a passage, append a citation marker:
 
@@ -85,8 +81,6 @@ can catch it. Check that each passage is about the thing that was asked about.
 
 If the passages do not contain the answer, say so plainly in one or two sentences and append
 no markers at all. Do not fall back on general knowledge, and do not apologise at length."""
-
-ANSWER_PROMPT = "Now write the answer, with citation markers, following the rules you were given."
 
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 
@@ -165,41 +159,16 @@ async def answer(
     history: list[types.Content] | None = None,
     document_ids: list[UUID] | None = None,
 ) -> AsyncIterator[dict]:
-    """Run the agent and yield SSE-shaped events. See PRD §7.5 for the event contract."""
+    """Run the agent and yield SSE-shaped events. See PRD §7.5 for the event contract.
+
+    `search` is emitted twice per search: once with `hits: null` the instant the model
+    decides to look something up, so the UI can show *what* it is looking for while the
+    query runs, and once more with the count when results are back.
+    """
     started = time.monotonic()
     session = Session()
     contents: list[types.Content] = list(history or [])
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=question)]))
-
-    # Phase 1 — the model searches until it is satisfied.
-    for _ in range(settings.max_search_rounds):
-        response = await generate(
-            contents,
-            system_instruction=SEARCH_SYSTEM.format(rounds=settings.max_search_rounds),
-            tools=[SEARCH_TOOL],
-        )
-        calls = response.function_calls or []
-        if not calls:
-            break
-
-        contents.append(response.candidates[0].content)
-        results: list[types.Part] = []
-        for call in calls:
-            query = str((call.args or {}).get("query", "")).strip()
-            hits = await search(conn, space_id, query, document_ids=document_ids) if query else []
-            for passage in hits:
-                session.passages[str(passage.chunk_id)] = passage
-            session.searches.append({"query": query, "hits": len(hits)})
-            yield {"type": "search", "query": query, "hits": len(hits)}
-            results.append(
-                types.Part.from_function_response(
-                    name=call.name, response={"passages": format_passages(hits)}
-                )
-            )
-        contents.append(types.Content(role="user", parts=results))
-
-    # Phase 2 — the answer, streamed, with markers resolved as they close.
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=ANSWER_PROMPT)]))
 
     markers = MarkerStream()
     emitted = ""
@@ -239,9 +208,54 @@ async def answer(
             citations.append(citation)
             yield {"type": "citation", "citation": citation}
 
-    async for part in stream(contents, system_instruction=ANSWER_SYSTEM):
-        async for event in handle(markers.feed(part.text or "")):
-            yield event
+    async def run_search(call) -> types.Part:
+        query = str((call.args or {}).get("query", "")).strip()
+        hits = await search(conn, space_id, query, document_ids=document_ids) if query else []
+        for passage in hits:
+            session.passages[str(passage.chunk_id)] = passage
+        session.searches.append({"query": query, "hits": len(hits)})
+        return types.Part.from_function_response(
+            name=call.name, response={"passages": format_passages(hits)}
+        )
+
+    # One streamed turn per round. A turn that calls the tool becomes a search and another
+    # round; a turn that produces text *is* the answer, streamed as it arrives. This is what
+    # removes the old "reply READY, then answer in a fresh call" round trip: the model's
+    # decision that it has enough and its answer are the same tokens.
+    system = SYSTEM.format(rounds=settings.max_search_rounds)
+    for round_no in range(settings.max_search_rounds + 1):
+        last_round = round_no == settings.max_search_rounds
+        calls: list = []
+        turn_parts: list[types.Part] = []
+
+        async for chunk in stream(
+            contents,
+            system_instruction=system,
+            tools=None if last_round else [SEARCH_TOOL],
+        ):
+            for part in (chunk.candidates[0].content.parts if chunk.candidates else []) or []:
+                turn_parts.append(part)
+                if part.function_call:
+                    calls.append(part.function_call)
+                elif part.text:
+                    async for event in handle(markers.feed(part.text)):
+                        yield event
+
+        if not calls:
+            break
+
+        # The model chose to search. Anything it said first was preamble, not an answer;
+        # the instruction forbids it, and it is short if it happens.
+        contents.append(types.Content(role="model", parts=turn_parts))
+        for call in calls:
+            query = str((call.args or {}).get("query", "")).strip()
+            yield {"type": "search", "query": query, "hits": None}
+        # Independent searches run together — a two-part question costs one wait, not two.
+        results = await asyncio.gather(*(run_search(call) for call in calls))
+        for call, entry in zip(calls, session.searches[-len(calls):]):
+            yield {"type": "search", "query": entry["query"], "hits": entry["hits"]}
+        contents.append(types.Content(role="user", parts=list(results)))
+
     async for event in handle(markers.flush()):
         yield event
 

@@ -326,6 +326,7 @@ async def stream(
     contents: list[types.Content],
     *,
     system_instruction: str,
+    tools: list[types.Tool] | None = None,
     temperature: float = 0.0,
 ):
     """Yield response chunks, retrying only before the first one.
@@ -344,6 +345,7 @@ async def stream(
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
+                    tools=tools,
                     temperature=temperature,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),

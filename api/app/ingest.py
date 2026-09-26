@@ -41,8 +41,8 @@ returning id, space_id, filename, mime_type, storage_key, attempts
 
 _INSERT_CHUNK = """
 insert into chunks (document_id, space_id, ordinal, page_start, page_end,
-                    char_start, char_end, text, embedding)
-values ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
+                    char_start, char_end, text)
+values ($1, $2, $3, $4, $5, $6, $7, $8)
 """
 
 
@@ -64,7 +64,14 @@ def discard(storage_key: str) -> None:
 
 
 async def process_one() -> bool:
-    """Claim and ingest a single document. Returns False when the queue is empty."""
+    """Claim one queued document, parse it, and make it searchable. Returns False when the
+    queue is empty.
+
+    Chunks are written immediately with no embedding. The keyword index is a generated
+    column, so the document is fully searchable by exact wording the moment this commits —
+    seconds after upload. Semantic search arrives as `embed_pending` fills the vectors in
+    behind, one batch at a time, and the two arms simply fuse whatever is there.
+    """
     async with acquire() as conn:
         job = await conn.fetchrow(_CLAIM)
         if job is None:
@@ -82,75 +89,36 @@ async def process_one() -> bool:
             if not chunks:
                 raise UnreadableDocument("This document contains no text.")
 
-            await conn.execute("update documents set status = 'embedding' where id = $1", job["id"])
-
-            # Resume rather than restart. Chunking is deterministic, so ordinals are stable
-            # across attempts: anything already embedded stays embedded. Without this a long
-            # document on a rate-limited key re-embeds from zero every retry and can never
-            # finish, because each attempt gets no further than the last.
-            already = {
-                r["ordinal"]
-                for r in await conn.fetch(
-                    "select ordinal from chunks where document_id = $1", job["id"]
+            async with conn.transaction():
+                # A retry after a parse-time crash starts clean; embeddings are never here
+                # yet, so nothing of value is lost.
+                await conn.execute("delete from chunks where document_id = $1", job["id"])
+                await conn.executemany(
+                    _INSERT_CHUNK,
+                    [
+                        (job["id"], job["space_id"], c.ordinal, c.page_start, c.page_end,
+                         c.char_start, c.char_end, c.text)
+                        for c in chunks
+                    ],
                 )
-            }
-            pending = [c for c in chunks if c.ordinal not in already]
-            if already:
-                log.info("%s: resuming, %d/%d chunks already embedded",
-                         job["filename"], len(already), len(chunks))
-
-            groups = batches([c.text for c in pending], settings.embed_batch_tokens,
-                             settings.embed_batch)
-            at = 0
-            for n, group in enumerate(groups, 1):
-                vectors = await embed_batch(group)
-                batch = pending[at : at + len(group)]
-                at += len(group)
-                async with conn.transaction():
-                    await conn.executemany(
-                        _INSERT_CHUNK,
-                        [
-                            (job["id"], job["space_id"], c.ordinal, c.page_start, c.page_end,
-                             c.char_start, c.char_end, c.text, vec(v))
-                            for c, v in zip(batch, vectors)
-                        ],
-                    )
-                    # Committing the batch also renews the claim, so a slow document is not
-                    # re-claimed by a second worker part-way through.
-                    await conn.execute(
-                        "update documents set locked_at = now() where id = $1", job["id"]
-                    )
-                if len(groups) > 4 and n % 5 == 0:
-                    log.info("%s: %d/%d batches", job["filename"], n, len(groups))
-
-            await conn.execute(
-                """update documents
-                      set status = 'ready', error = null, locked_at = null, retry_after = null,
-                          page_offsets = $3,
-                          page_count = coalesce(page_count, $2)
-                    where id = $1""",
-                job["id"],
-                max((c.page_end or 0) for c in chunks) or None,
-                [[start, number] for start, number in page_offsets(pages)],
-            )
-            log.info("ingested %s (%d chunks)", job["filename"], len(chunks))
-
-        except UnreadableDocument as e:
-            # The document itself is the problem. Retrying changes nothing.
-            await _fail(conn, job["id"], str(e))  # the file itself is the problem
-        except Exception as e:  # noqa: BLE001 — anything else may be transient
-            log.exception("ingest failed for %s", job["filename"])
-            if is_transient(e):
-                # Not the document's fault. Wait out the window and take another run at it,
-                # and do not spend one of its attempts doing so.
                 await conn.execute(
                     """update documents
-                          set status = 'queued', locked_at = null, attempts = attempts - 1,
-                              retry_after = now() + $2, error = $3
+                          set status = 'ready', error = null, locked_at = null, retry_after = null,
+                              page_offsets = $3,
+                              page_count = coalesce(page_count, $2)
                         where id = $1""",
-                    job["id"], RETRY_WINDOW, friendly_error(e),
+                    job["id"],
+                    max((c.page_end or 0) for c in chunks) or None,
+                    [[start, number] for start, number in page_offsets(pages)],
                 )
-            elif job["attempts"] >= MAX_ATTEMPTS:
+            log.info("%s: searchable, %d chunks; embedding in the background",
+                     job["filename"], len(chunks))
+
+        except UnreadableDocument as e:
+            await _fail(conn, job["id"], str(e))  # the file itself is the problem
+        except Exception as e:  # noqa: BLE001 — parse-time failures are rare and worth a retry
+            log.exception("ingest failed for %s", job["filename"])
+            if job["attempts"] >= MAX_ATTEMPTS:
                 await _fail(conn, job["id"],
                             f"Failed after {MAX_ATTEMPTS} attempts. {friendly_error(e)}")
             else:
@@ -158,6 +126,78 @@ async def process_one() -> bool:
                     "update documents set status = 'queued', locked_at = null where id = $1",
                     job["id"],
                 )
+        return True
+
+
+# Which ready document still has vectors to fill in. Oldest first, and never one that is
+# waiting out a rate-limit window.
+_NEXT_TO_EMBED = """
+select d.id, d.filename
+  from documents d
+ where d.status = 'ready'
+   and (d.retry_after is null or d.retry_after <= now())
+   and exists (select 1 from chunks c where c.document_id = d.id and c.embedding is null)
+ order by d.created_at
+ limit 1
+"""
+
+
+async def embed_pending() -> bool:
+    """Fill in embeddings for one batch of one document. Returns False when nothing is waiting.
+
+    Separate from `process_one` on purpose: parsing is fast and local, embedding is slow
+    and rate limited. Coupling them would hold a document hostage to the embedding API.
+    Each batch is its own commit, so progress survives a crash and a throttled key just
+    means the semantic arm grows more slowly.
+    """
+    async with acquire() as conn:
+        doc = await conn.fetchrow(_NEXT_TO_EMBED)
+        if doc is None:
+            return False
+
+        pending = await conn.fetch(
+            "select id, text from chunks where document_id = $1 and embedding is null "
+            "order by ordinal limit $2",
+            doc["id"], settings.embed_batch,
+        )
+        group = batches([r["text"] for r in pending], settings.embed_batch_tokens,
+                        settings.embed_batch)[0]
+        rows = pending[: len(group)]
+
+        try:
+            vectors = await embed_batch(group)
+        except Exception as e:  # noqa: BLE001
+            if is_transient(e):
+                limit = parse_rate_limit(e)
+                await conn.execute(
+                    "update documents set retry_after = now() + $2, error = $3 where id = $1",
+                    doc["id"], limit.delay if limit else RETRY_WINDOW, friendly_error(e),
+                )
+                return True
+            # Anything else: leave the chunks unembedded and log. Keyword search still works,
+            # and the next pass will try again.
+            log.exception("embedding failed for %s", doc["filename"])
+            await conn.execute(
+                "update documents set retry_after = now() + $2, error = $3 where id = $1",
+                doc["id"], RETRY_WINDOW, friendly_error(e),
+            )
+            return True
+
+        async with conn.transaction():
+            await conn.executemany(
+                "update chunks set embedding = $2::vector where id = $1",
+                [(r["id"], vec(v)) for r, v in zip(rows, vectors)],
+            )
+            remaining = await conn.fetchval(
+                "select count(*) from chunks where document_id = $1 and embedding is null",
+                doc["id"],
+            )
+            if remaining == 0:
+                await conn.execute(
+                    "update documents set error = null, retry_after = null where id = $1",
+                    doc["id"],
+                )
+                log.info("%s: fully embedded", doc["filename"])
         return True
 
 
@@ -173,7 +213,9 @@ async def run_worker(stop: asyncio.Event) -> None:
     idle latency, at the cost of a dedicated connection and reconnect handling."""
     while not stop.is_set():
         try:
-            if await process_one():
+            # Parsing first: it is fast, local, and makes a document searchable. Then fill
+            # in vectors. A throttled embedding API never blocks a new upload from landing.
+            if await process_one() or await embed_pending():
                 continue
         except Exception:  # noqa: BLE001 — a worker must not die on a bad row
             log.exception("worker iteration failed")

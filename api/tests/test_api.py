@@ -95,22 +95,24 @@ def sse(text: str) -> list[dict]:
 
 
 def script_model(monkeypatch, *, searches, tokens):
+    """One tool-calling streamed turn per search, then the answer streamed as tokens.
+    Same shape as the real Gemini stream: chunks with parts carrying function_call or text."""
     pending = list(searches)
 
-    async def fake_generate(contents, *, system_instruction, tools=None, temperature=0.0):
-        if not pending:
-            return SimpleNamespace(function_calls=[], candidates=[])
-        call = SimpleNamespace(name="search_documents", args={"query": pending.pop(0)})
-        return SimpleNamespace(
-            function_calls=[call],
-            candidates=[SimpleNamespace(content=SimpleNamespace(role="model", parts=[]))],
-        )
+    def chunk(*parts):
+        return SimpleNamespace(candidates=[SimpleNamespace(
+            content=SimpleNamespace(role="model", parts=list(parts)))])
 
-    async def fake_stream(contents, *, system_instruction, temperature=0.0):
-        for t in tokens:  # an async generator, matching gemini.stream
-            yield SimpleNamespace(text=t)
+    async def fake_stream(contents, *, system_instruction, tools=None, temperature=0.0):
+        if pending and tools is not None:
+            query = pending.pop(0)
+            yield chunk(SimpleNamespace(
+                function_call=SimpleNamespace(name="search_documents", args={"query": query}),
+                text=None))
+            return
+        for t in tokens:
+            yield chunk(SimpleNamespace(function_call=None, text=t))
 
-    monkeypatch.setattr(agent, "generate", fake_generate)
     monkeypatch.setattr(agent, "stream", fake_stream)
 
 
@@ -423,8 +425,8 @@ async def test_shared_bytes_survive_until_the_last_reference_goes(client, accoun
 async def test_a_rate_limited_document_waits_instead_of_being_written_off(
     client, account, monkeypatch
 ):
-    """A daily quota needs hours; our in-process backoff covers seconds. Giving up after
-    three fast retries bricks a perfectly good file until the user deletes and re-uploads."""
+    """A daily quota needs hours; the in-process backoff covers seconds. And crucially the
+    document stays *ready* while it waits — keyword search works the whole time."""
     from google.genai.errors import ClientError
 
     async def rate_limited(texts, task_type="RETRIEVAL_DOCUMENT"):
@@ -440,17 +442,17 @@ async def test_a_rate_limited_document_waits_instead_of_being_written_off(
         files={"file": ("MSA.pdf", make_pdf(CLAUSE), "application/pdf")}, headers=auth,
     )).json()
 
-    for _ in range(4):  # more than MAX_ATTEMPTS — it must not exhaust them
-        await ingest.process_one()
+    assert await ingest.process_one() is True      # parses, never touches the API
+    assert await ingest.embed_pending() is True    # tries to embed, gets throttled
 
     async with acquire() as conn:
         row = await conn.fetchrow(
             "select status, attempts, error, retry_after from documents where id = $1", doc["id"])
-    assert row["status"] == "queued", "a provider quota is not a bad document"
-    assert row["attempts"] <= 0, "a throttled run must not spend an attempt"
+    assert row["status"] == "ready", "throttled embedding must not take the document offline"
+    assert row["attempts"] == 1, "one parse attempt; throttling does not count"
     assert row["retry_after"] is not None
     assert "Rate limited" in row["error"] and "RESOURCE_EXHAUSTED" not in row["error"]
-    assert await ingest.process_one() is False, "it should not be claimed again until it is due"
+    assert await ingest.embed_pending() is False, "not due yet, so the worker leaves it alone"
 
 
 async def test_a_failed_document_can_be_retried(client, account, monkeypatch):
@@ -486,12 +488,14 @@ async def test_a_document_waiting_on_quota_can_be_tried_immediately(client, acco
         files={"file": ("MSA.pdf", make_pdf(CLAUSE), "application/pdf")}, headers=auth,
     )).json()
     await ingest.process_one()
-    assert await ingest.process_one() is False, "it is waiting, so the worker leaves it alone"
+    await ingest.embed_pending()
+    assert await ingest.embed_pending() is False, "it is waiting, so the worker leaves it alone"
 
     r = await client.post(f"/api/documents/{doc['id']}/retry", headers=auth)
-    assert r.status_code == 202
+    assert r.status_code == 202, "a ready document waiting on quota is exactly what retry is for"
     assert r.json()["retry_after"] is None, "the wait is cleared"
-    assert await ingest.process_one() is True, "and the worker picks it straight up"
+    assert r.json()["status"] == "ready", "and it was never taken offline to do it"
+    assert await ingest.embed_pending() is True, "the worker picks it straight up"
 
 
 async def test_retrying_a_healthy_document_is_refused(client, account):
@@ -523,11 +527,13 @@ async def test_the_retry_time_reaches_the_client(client, account, monkeypatch):
         files={"file": ("MSA.pdf", make_pdf(CLAUSE), "application/pdf")}, headers=auth,
     )
     await ingest.process_one()
+    await ingest.embed_pending()
 
     doc = (await client.get(f"/api/spaces/{space['id']}/documents", headers=auth)).json()[0]
-    assert doc["status"] == "queued"
+    assert doc["status"] == "ready"
     assert doc["retry_after"] is not None, "the client cannot show a time it was never sent"
     assert doc["error"] == "Daily free-tier limit reached (20 requests)."
+    assert doc["indexed_chunks"] == 0 and doc["total_chunks"] > 0
 
     async with acquire() as conn:
         minutes = await conn.fetchval(
@@ -584,3 +590,123 @@ async def test_embedding_progress_survives_a_rate_limit_mid_document(client, acc
             "from documents where id = $1", doc["id"])
     assert row["status"] == "ready"
     assert sum(embedded) == row["n"] - after_first, "already-embedded chunks were not redone"
+
+
+async def test_a_document_is_searchable_by_keyword_before_any_embedding_happens(
+    client, account, monkeypatch
+):
+    """The point of splitting parsing from embedding. A user should be able to ask a
+    question seconds after upload, not after every embedding request clears a rate limit."""
+    calls = {"n": 0}
+
+    async def never_reached(texts, task_type="RETRIEVAL_DOCUMENT"):
+        calls["n"] += 1
+        return [[1.0] + [0.0] * (DIMS - 1) for _ in texts]
+
+    monkeypatch.setattr(ingest, "embed_batch", never_reached)
+
+    auth = await account()
+    space = (await client.post("/api/spaces", json={"name": "Instant"}, headers=auth)).json()
+    doc = (await client.post(
+        f"/api/spaces/{space['id']}/documents",
+        files={"file": ("MSA.pdf", make_pdf(CLAUSE), "application/pdf")}, headers=auth,
+    )).json()
+
+    assert await ingest.process_one() is True
+    assert calls["n"] == 0, "parsing must not touch the embedding API"
+
+    listed = (await client.get(f"/api/spaces/{space['id']}/documents", headers=auth)).json()[0]
+    assert listed["status"] == "ready", "searchable the moment chunks land"
+    assert listed["total_chunks"] > 0
+    assert listed["indexed_chunks"] == 0, "no vectors yet — and that is fine"
+
+    # The keyword arm needs no vectors. The query stub points the dense arm nowhere.
+    async with acquire() as conn:
+        hits = await retrieval.search(conn, space["id"], "thirty (30) days")
+    assert hits, "keyword search found it with zero embeddings in the table"
+    assert hits[0].sem_rank is None and hits[0].kw_rank == 1
+
+    # Now the backfill runs and the semantic arm comes online.
+    assert await ingest.embed_pending() is True
+    listed = (await client.get(f"/api/spaces/{space['id']}/documents", headers=auth)).json()[0]
+    assert listed["indexed_chunks"] == listed["total_chunks"]
+    assert await ingest.embed_pending() is False, "nothing left to embed"
+
+
+# ------------------------------------------------------------------ F5: chat history
+
+
+async def _conversation_with_one_exchange(client, auth, monkeypatch, space_name="History"):
+    space = (await client.post("/api/spaces", json={"name": space_name}, headers=auth)).json()
+    await client.post(
+        f"/api/spaces/{space['id']}/documents",
+        files={"file": ("MSA.pdf", make_pdf(CLAUSE), "application/pdf")}, headers=auth,
+    )
+    await ingest.process_one()
+    await ingest.embed_pending()
+    convo = (await client.post(f"/api/spaces/{space['id']}/conversations", headers=auth)).json()
+    async with acquire() as conn:
+        chunk_id = await conn.fetchval("select id from chunks limit 1")
+    script_model(monkeypatch, searches=["termination"],
+                 tokens=[f"Thirty days.[[{chunk_id}|thirty (30) days prior written notice]]"])
+    await client.post(f"/api/conversations/{convo['id']}/messages",
+                      json={"content": "how much notice?"}, headers=auth)
+    return space, convo
+
+
+async def test_stored_messages_carry_everything_needed_to_restore_a_conversation(
+    client, account, monkeypatch
+):
+    """Reload must bring back the citations *and* what the agent searched for — the UI shows
+    both, and a history that loses either is not the conversation the user had."""
+    auth = await account()
+    _, convo = await _conversation_with_one_exchange(client, auth, monkeypatch)
+
+    msgs = (await client.get(f"/api/conversations/{convo['id']}/messages", headers=auth)).json()
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    reply = msgs[1]
+    assert reply["citations"][0]["quote"] == "thirty (30) days prior written notice"
+    assert reply["searches"] == [{"query": "termination", "hits": 1}]
+    assert reply["created_at"]
+
+
+async def test_conversations_list_orders_by_last_activity_with_counts(client, account, monkeypatch):
+    auth = await account()
+    space, first = await _conversation_with_one_exchange(client, auth, monkeypatch)
+    second = (await client.post(f"/api/spaces/{space['id']}/conversations", headers=auth)).json()
+
+    listed = (await client.get(f"/api/spaces/{space['id']}/conversations", headers=auth)).json()
+    assert [c["id"] for c in listed][:2] == [second["id"], first["id"]], "newest activity first"
+    by_id = {c["id"]: c for c in listed}
+    assert by_id[first["id"]]["message_count"] == 2
+    assert by_id[first["id"]]["title"] == "how much notice?", "auto-titled from the question"
+    assert by_id[second["id"]]["message_count"] == 0
+
+
+async def test_a_conversation_can_be_renamed_and_deleted(client, account, monkeypatch):
+    auth = await account()
+    space, convo = await _conversation_with_one_exchange(client, auth, monkeypatch)
+
+    r = await client.patch(f"/api/conversations/{convo['id']}", json={"title": "  Notice period  "},
+                           headers=auth)
+    assert r.status_code == 200 and r.json()["title"] == "Notice period"
+
+    r = await client.patch(f"/api/conversations/{convo['id']}", json={"title": ""}, headers=auth)
+    assert r.status_code == 422, "an empty title is not a rename"
+
+    assert (await client.delete(f"/api/conversations/{convo['id']}", headers=auth)).status_code == 204
+    assert (await client.get(f"/api/conversations/{convo['id']}/messages", headers=auth)).status_code == 404
+    async with acquire() as conn:
+        assert await conn.fetchval("select count(*) from messages where conversation_id = $1",
+                                   convo["id"]) == 0, "messages cascade"
+
+
+async def test_another_tenant_cannot_rename_or_delete_my_conversation(client, account, monkeypatch):
+    mine, theirs = await account(), await account()
+    _, convo = await _conversation_with_one_exchange(client, mine, monkeypatch)
+
+    assert (await client.patch(f"/api/conversations/{convo['id']}", json={"title": "x"},
+                               headers=theirs)).status_code == 404
+    assert (await client.delete(f"/api/conversations/{convo['id']}", headers=theirs)).status_code == 404
+    assert (await client.get(f"/api/conversations/{convo['id']}/messages",
+                             headers=mine)).status_code == 200, "and mine is untouched"

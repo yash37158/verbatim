@@ -1,17 +1,109 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
-import { listDocuments, retryDocument, uploadDocument } from "@/lib/api";
-import type { Citation, Doc, Space } from "@/lib/types";
+import {
+  deleteConversation,
+  listConversations,
+  listDocuments,
+  listMessages,
+  renameConversation,
+  retryDocument,
+  uploadDocument,
+} from "@/lib/api";
+import type { Citation, Conversation, Doc, Message, Space } from "@/lib/types";
 import { ChatPane } from "@/components/ChatPane";
+import { ConversationList } from "@/components/ConversationList";
 import { DocumentsPane } from "@/components/DocumentsPane";
 import { SourceDrawer } from "@/components/SourceDrawer";
 import { cn } from "@/components/ui";
 
-export function Workspace({ space, documents }: { space: Space; documents: Doc[] }) {
+export function Workspace({
+  space,
+  documents,
+  conversations: initialConversations,
+  activeConversation,
+  initialMessages,
+}: {
+  space: Space;
+  documents: Doc[];
+  conversations: Conversation[];
+  /** From `?c=` — the page preloads its messages server-side so a reload restores it. */
+  activeConversation: Conversation | null;
+  initialMessages: Message[];
+}) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [docs, setDocs] = useState(documents);
+  const [conversations, setConversations] = useState(initialConversations);
+  const [active, setActive] = useState<{ id: string | null; messages: Message[] }>({
+    id: activeConversation?.id ?? null,
+    messages: initialMessages,
+  });
+
+  function setUrl(id: string | null) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (id) params.set("c", id);
+    else params.delete("c");
+    const qs = params.toString();
+    router.replace(`/spaces/${space.id}${qs ? `?${qs}` : ""}`, { scroll: false });
+  }
+
+  async function openConversation(id: string) {
+    if (id === active.id) return;
+    try {
+      const messages = await listMessages(id);
+      setCitation(null); // a source panel from the thread being left should not linger
+      setActive({ id, messages });
+      setUrl(id);
+    } catch {
+      // The list refresh below will drop it if it is gone.
+      setConversations(await listConversationsSafe());
+    }
+  }
+
+  function newChat() {
+    setCitation(null);
+    setActive({ id: null, messages: [] });
+    setUrl(null);
+  }
+
+  function conversationCreated(c: Conversation) {
+    setConversations((list) => [c, ...list]);
+    setActive((a) => ({ ...a, id: c.id }));
+    setUrl(c.id);
+  }
+
+  async function rename(id: string, title: string) {
+    const updated = await renameConversation(id, title);
+    setConversations((list) => list.map((c) => (c.id === id ? { ...c, ...updated } : c)));
+  }
+
+  async function remove(id: string) {
+    await deleteConversation(id);
+    setConversations((list) => list.filter((c) => c.id !== id));
+    if (active.id === id) newChat();
+  }
+
+  async function listConversationsSafe(): Promise<Conversation[]> {
+    try {
+      return await listConversations(space.id);
+    } catch {
+      return conversations; // a blip on one refresh is not worth losing the list over
+    }
+  }
+
+  // Titles are assigned by the backend on the first question; pull the list once the first
+  // exchange finishes so the sidebar shows the real title instead of "Untitled chat".
+  useEffect(() => {
+    const untitled = conversations.find((c) => c.id === active.id && !c.title);
+    if (!untitled) return;
+    const t = setTimeout(async () => setConversations(await listConversationsSafe()), 1500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active.id, active.messages.length]);
   const [selected, setSelected] = useState(
     () => new Set(documents.filter((d) => d.status === "ready").map((d) => d.id)),
   );
@@ -67,7 +159,12 @@ export function Workspace({ space, documents }: { space: Space; documents: Doc[]
 
   // Ingestion is asynchronous, so the statuses have to be pulled. Polling only runs while
   // something is actually in flight — an idle Space makes no requests.
-  const settling = docs.some((d) => d.status !== "ready" && d.status !== "failed");
+  const settling = docs.some(
+    (d) =>
+      (d.status !== "ready" && d.status !== "failed") ||
+      (d.status === "ready" && d.total_chunks != null && d.indexed_chunks != null &&
+        d.indexed_chunks < d.total_chunks),
+  );
   useEffect(() => {
     if (!settling) return;
     const timer = setInterval(async () => {
@@ -115,14 +212,24 @@ export function Workspace({ space, documents }: { space: Space; documents: Doc[]
             All Spaces
           </Link>
         </div>
-        <DocumentsPane
-          documents={docs}
-          selected={selected}
-          onToggle={toggle}
-          onUpload={upload}
-          onRetry={retry}
-          className="h-[calc(100%-3rem)]"
-        />
+        <div className="flex h-[calc(100%-3rem)] flex-col bg-surface">
+          <ConversationList
+            conversations={conversations}
+            activeId={active.id}
+            onSelect={openConversation}
+            onNew={newChat}
+            onRename={rename}
+            onDelete={remove}
+          />
+          <DocumentsPane
+            documents={docs}
+            selected={selected}
+            onToggle={toggle}
+            onUpload={upload}
+            onRetry={retry}
+            className="min-h-0 flex-1"
+          />
+        </div>
       </div>
 
       {showDocs && (
@@ -135,9 +242,15 @@ export function Workspace({ space, documents }: { space: Space; documents: Doc[]
       )}
 
       <ChatPane
+        // Keyed on the conversation: switching remounts the pane with that thread's
+        // messages, which is simpler and safer than resetting state inside it.
+        key={active.id ?? "new"}
         spaceId={space.id}
         spaceName={space.name}
         selectedIds={[...selected]}
+        conversationId={active.id}
+        initialMessages={active.messages}
+        onConversationCreated={conversationCreated}
         onCite={setCitation}
         onToggleDocs={() => setShowDocs((v) => !v)}
         className="flex-1"

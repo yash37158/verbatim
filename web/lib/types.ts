@@ -19,7 +19,8 @@ export interface Doc {
   status: DocStatus;
   error?: string;
   retry_after?: string | null; // ISO; when the worker will try this document again
-  indexed_chunks?: number | null; // sections already embedded — progress survives retries
+  total_chunks?: number | null;   // searchable by keyword as soon as this is > 0
+  indexed_chunks?: number | null; // of those, how many also have a vector for semantic search
 }
 
 export interface Citation {
@@ -38,11 +39,21 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  searches?: { query: string; hits: number | null }[]; // what the agent looked up
   abstained?: boolean;
   error?: string;
 }
 
+export interface Conversation {
+  id: string;
+  title: string | null; // null until the first question auto-titles it
+  created_at: string;
+  last_message_at: string;
+  message_count: number;
+}
+
 export type StreamEvent =
+  | { type: "search"; query: string; hits: number | null } // hits null while it runs
   | { type: "token"; text: string }
   | { type: "citation"; citation: Citation }
   | { type: "done"; message_id: string; latency_ms: number }

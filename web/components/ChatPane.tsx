@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowUp, PanelLeft, Sparkles } from "lucide-react";
 import { createConversation, streamAnswer } from "@/lib/api";
+import type { Conversation } from "@/lib/types";
 import type { Citation, Message } from "@/lib/types";
 import { AnswerText } from "@/components/AnswerText";
 import { Button, cn } from "@/components/ui";
@@ -17,6 +18,9 @@ export function ChatPane({
   spaceId,
   spaceName,
   selectedIds,
+  conversationId,
+  initialMessages,
+  onConversationCreated,
   onCite,
   onToggleDocs,
   className,
@@ -24,16 +28,25 @@ export function ChatPane({
   spaceId: string;
   spaceName: string;
   selectedIds: string[];
+  /** null = a fresh chat that has not been persisted yet. The parent keys this component
+   *  on the id, so switching conversations remounts it with the right messages. */
+  conversationId: string | null;
+  initialMessages: Message[];
+  onConversationCreated: (c: Conversation) => void;
   onCite: (c: Citation) => void;
   onToggleDocs: () => void;
   className?: string;
 }) {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [pending, setPending] = useState<{ content: string; citations: Citation[] } | null>(null);
+  const [messages, setMessages] = useState<Message[]>(initialMessages);
+  const [pending, setPending] = useState<{
+    content: string;
+    citations: Citation[];
+    searching: string | null; // the query the agent is running right now
+  } | null>(null);
   const [draft, setDraft] = useState("");
   // A conversation is created on the first question, not on mount — opening a Space
   // should not leave an empty thread behind.
-  const conversation = useRef<string | null>(null);
+  const conversation = useRef<string | null>(conversationId);
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -45,13 +58,18 @@ export function ChatPane({
     if (!q || pending) return;
     setDraft("");
     setMessages((m) => [...m, { id: `u_${Date.now()}`, role: "user", content: q, citations: [] }]);
-    setPending({ content: "", citations: [] });
+    setPending({ content: "", citations: [], searching: null });
 
     let content = "";
     let failure = "";
     const citations: Citation[] = [];
+    const searches: NonNullable<Message["searches"]> = [];
     try {
-      conversation.current ??= (await createConversation(spaceId)).id;
+      if (!conversation.current) {
+        const created = await createConversation(spaceId);
+        conversation.current = created.id;
+        onConversationCreated(created);
+      }
     } catch (e) {
       setMessages((m) => [...m, { id: `a_${Date.now()}`, role: "assistant",
         content: `Could not start a conversation: ${e instanceof Error ? e.message : e}`,
@@ -59,12 +77,20 @@ export function ChatPane({
       setPending(null);
       return;
     }
+    let searching: string | null = null;
     for await (const event of streamAnswer(conversation.current, q, selectedIds)) {
-      if (event.type === "token") content += event.text;
-      else if (event.type === "citation") citations.push(event.citation);
-      else if (event.type === "error") failure = event.message;
+      if (event.type === "token") {
+        content += event.text;
+        searching = null; // text is arriving, so the searching is over
+      } else if (event.type === "citation") citations.push(event.citation);
+      else if (event.type === "search") {
+        // Two events per search: hits null while it runs, then the count. Show the query
+        // the moment it starts so the wait has a name.
+        searching = event.hits === null ? event.query : null;
+        if (event.hits !== null) searches.push({ query: event.query, hits: event.hits });
+      } else if (event.type === "error") failure = event.message;
       else continue;
-      setPending({ content, citations: [...citations] });
+      setPending({ content, citations: [...citations], searching });
     }
 
     setMessages((m) => [
@@ -74,6 +100,7 @@ export function ChatPane({
         role: "assistant",
         content,
         citations,
+        searches,
         abstained: citations.length === 0,
         // A failure part-way through leaves real text on screen. Keep it, and say
         // separately that it was cut short, rather than splicing an error into the answer.
@@ -157,7 +184,13 @@ export function ChatPane({
                 ) : (
                   <p className="flex items-center gap-2 text-[13px] text-faint">
                     <span className="size-1.5 animate-pulse rounded-full bg-current" />
-                    Searching {selectedIds.length} documents…
+                    {pending.searching ? (
+                      <>
+                        Searching for <span className="text-muted">“{pending.searching}”</span>
+                      </>
+                    ) : (
+                      <>Searching {selectedIds.length} documents…</>
+                    )}
                   </p>
                 )}
               </div>

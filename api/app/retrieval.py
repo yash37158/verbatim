@@ -6,6 +6,7 @@ Reciprocal Rank Fusion combines the two rankings without needing the two scores 
 commensurable, which they are not.
 """
 
+import logging
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -13,7 +14,9 @@ import asyncpg
 
 from .config import settings
 from .db import vec
-from .gemini import embed_query
+from .gemini import embed_query, friendly_error, is_transient
+
+log = logging.getLogger("verbatim.retrieval")
 
 # One query, both arms, fused in the database: no round trip to fuse, and the planner
 # keeps the tenant filter next to the index scan.
@@ -33,6 +36,8 @@ sem as (
         select id, embedding <=> $3::vector as dist
         from chunks
         where space_id = $1
+          and $3::vector is not null  -- no query vector: the embedding API was unavailable
+          and embedding is not null   -- still being filled in; the keyword arm covers it
           and (cardinality($2::uuid[]) = 0 or document_id = any($2))
         order by embedding <=> $3::vector
         limit $4
@@ -113,12 +118,24 @@ async def search(
     document_ids: list[UUID] | None = None,
     top_k: int | None = None,
 ) -> list[Passage]:
-    """Retrieve passages for `query`, scoped to one Space the caller already owns."""
+    """Retrieve passages for `query`, scoped to one Space the caller already owns.
+
+    If the embedding API refuses the query — throttled, overloaded — search still runs on
+    the keyword arm alone. A rate limit on one provider must not turn into "no answer".
+    """
+    try:
+        query_vector: str | None = vec(await embed_query(query))
+    except Exception as e:  # noqa: BLE001
+        if not is_transient(e):
+            raise
+        log.warning("query embedding unavailable, keyword-only search: %s", friendly_error(e))
+        query_vector = None
+
     rows = await conn.fetch(
         _SEARCH_SQL,
         space_id,
         document_ids or [],
-        vec(await embed_query(query)),
+        query_vector,
         settings.retrieval_candidates,
         query,
         settings.rrf_k,

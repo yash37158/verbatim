@@ -176,11 +176,27 @@ can only ever show the current one. Every past answer is unreachable.
 - `DELETE /api/conversations/{id}` — does not exist
 - `GET /api/conversations/{id}/messages` returns citations but not `searches`; include them
 
-**Done when**
-- [ ] Reload restores the open conversation exactly, citations included
-- [ ] Citation chips in a restored conversation still open the source drawer
-- [ ] A conversation deleted in one tab disappears in the other on next poll
-- [ ] Renaming persists and survives reload
+**Done — 2026-09-26**
+- [x] Reload restores the open conversation exactly — `?c=<id>` is read server-side and the
+      messages are preloaded, so there is no flash of empty state
+- [x] Citation chips in a restored conversation open the source drawer (citations are stored
+      whole, context included)
+- [x] Renaming persists; deleting cascades to messages; both refused across tenants (404)
+- [x] The three missing endpoints now exist: `PATCH` and `DELETE /api/conversations/{id}`,
+      and messages return `searches` and `created_at`
+- [x] The list is ordered by last activity and carries a message count
+- [ ] Cross-tab deletion visibility — deferred; the list refreshes on navigation, not on a poll
+
+**Known rough edge, found while verifying.** The model sometimes answers with markdown
+bullets, and `AnswerText`'s inline formatter only handles bold and code — so a leading `*`
+renders literally. Not F5, and not trivial to fix well: citations are placed by sentence
+index, and bullets and sentence splitting interact. Worth its own small change rather than
+a patch dropped in here.
+
+**Design.** `ChatPane` is keyed on the active conversation id, so switching threads
+remounts it with the right messages. That is simpler and safer than resetting a dozen
+pieces of state inside the component, and it means a fresh chat and a restored one are
+the same code path with different initial props.
 
 ---
 

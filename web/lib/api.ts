@@ -2,7 +2,7 @@
 // Set NEXT_PUBLIC_API_URL and every call below switches over; nothing else changes.
 import { drainSSE } from "./sse";
 import * as mock from "./mock";
-import type { Doc, Space, StreamEvent } from "./types";
+import type { Conversation, Doc, Message, Space, StreamEvent } from "./types";
 
 // One switch, two targets. Server components call FastAPI directly — a relative URL is
 // not fetchable from Node, and bouncing off our own proxy would be a pointless round trip.
@@ -103,15 +103,46 @@ export async function listDocuments(spaceId: string): Promise<Doc[]> {
   return LIVE ? get(`/api/spaces/${spaceId}/documents`) : (mock.docs[spaceId] ?? []);
 }
 
-export async function createConversation(spaceId: string): Promise<{ id: string }> {
-  if (!LIVE) return { id: "c_mock" };
-  const res = await fetch(`${BASE}/api/spaces/${spaceId}/conversations`, {
-    method: "POST",
+export async function listConversations(spaceId: string): Promise<Conversation[]> {
+  return LIVE ? get(`/api/spaces/${spaceId}/conversations`) : mock.listConversations(spaceId);
+}
+
+export async function listMessages(conversationId: string): Promise<Message[]> {
+  if (!LIVE) return mock.listMessages(conversationId);
+  const rows = await get<Message[]>(`/api/conversations/${conversationId}/messages`);
+  // A restored assistant turn with nothing cited was an abstention; mark it so the footer
+  // reads the same as it did live.
+  return rows.map((m) =>
+    m.role === "assistant" ? { ...m, abstained: m.citations.length === 0 } : m,
+  );
+}
+
+export async function createConversation(spaceId: string): Promise<Conversation> {
+  if (!LIVE) return mock.createConversation(spaceId);
+  return send(`/api/spaces/${spaceId}/conversations`, "POST");
+}
+
+export async function renameConversation(id: string, title: string): Promise<Conversation> {
+  if (!LIVE) return mock.renameConversation(id, title);
+  return send(`/api/conversations/${id}`, "PATCH", { title });
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  if (!LIVE) return mock.deleteConversation(id);
+  await send(`/api/conversations/${id}`, "DELETE");
+}
+
+/** JSON request with a body, sharing the 401 handling of `get`. */
+async function send<T>(path: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
     credentials: "include",
-    headers: await authHeaders(),
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (res.status === 401) ended();
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  return res.status === 204 ? (undefined as T) : res.json();
 }
 
 /**
@@ -124,7 +155,7 @@ export async function* streamAnswer(
   documentIds?: string[],
 ): AsyncGenerator<StreamEvent> {
   if (!LIVE) {
-    yield* mock.streamMockAnswer(question);
+    yield* mock.streamMockAnswer(question, conversationId);
     return;
   }
 

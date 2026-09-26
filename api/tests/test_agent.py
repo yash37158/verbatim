@@ -96,24 +96,30 @@ async def indexed(conn, space, monkeypatch):
 
 
 def script_model(monkeypatch, *, searches: list[str], tokens: list[str]):
-    """Stub the model: it issues `searches`, then streams `tokens`."""
+    """Stub the model as a script of streamed turns: one tool-calling turn per entry in
+    `searches`, then a final turn that streams `tokens` as the answer.
+
+    Mirrors the real contract exactly — a stream of chunks whose parts carry either a
+    function_call or text — so the agent's parsing of that stream is what gets tested.
+    """
     pending = list(searches)
     seen: list[list] = []
 
-    async def fake_generate(contents, *, system_instruction, tools=None, temperature=0.0):
+    def chunk(*parts):
+        return SimpleNamespace(candidates=[SimpleNamespace(
+            content=SimpleNamespace(role="model", parts=list(parts)))])
+
+    async def fake_stream(contents, *, system_instruction, tools=None, temperature=0.0):
         seen.append(contents)
-        if not pending:
-            return SimpleNamespace(function_calls=[], candidates=[])
-        query = pending.pop(0)
-        call = SimpleNamespace(name="search_documents", args={"query": query})
-        content = SimpleNamespace(role="model", parts=[])
-        return SimpleNamespace(function_calls=[call], candidates=[SimpleNamespace(content=content)])
+        if pending and tools is not None:
+            query = pending.pop(0)
+            yield chunk(SimpleNamespace(
+                function_call=SimpleNamespace(name="search_documents", args={"query": query}),
+                text=None))
+            return
+        for t in tokens:
+            yield chunk(SimpleNamespace(function_call=None, text=t))
 
-    async def fake_stream(contents, *, system_instruction, temperature=0.0):
-        for t in tokens:  # an async generator, matching gemini.stream
-            yield SimpleNamespace(text=t)
-
-    monkeypatch.setattr(agent, "generate", fake_generate)
     monkeypatch.setattr(agent, "stream", fake_stream)
     return seen
 
@@ -133,8 +139,11 @@ async def test_a_verified_quote_becomes_a_citation_with_the_documents_own_wordin
     )
     events = await collect(conn, indexed["space_id"], "how do we get out of this?")
 
-    search_event = next(e for e in events if e["type"] == "search")
-    assert search_event == {"type": "search", "query": "termination for convenience", "hits": 1}
+    # Two events per search: one the moment the model decides to search (hits unknown), so
+    # the UI can show what it is looking for, and one when the results are in.
+    searches = [e for e in events if e["type"] == "search"]
+    assert searches[0] == {"type": "search", "query": "termination for convenience", "hits": None}
+    assert searches[1] == {"type": "search", "query": "termination for convenience", "hits": 1}
 
     citation = next(e for e in events if e["type"] == "citation")["citation"]
     assert citation["quote"] == "thirty (30) days’ prior written notice"
@@ -193,16 +202,17 @@ async def test_the_agent_can_search_several_times_before_answering(conn, indexed
         tokens=["Three things happen."],
     )
     events = await collect(conn, indexed["space_id"], "walk me through ending the contract")
-    assert [e["query"] for e in events if e["type"] == "search"] == [
-        "notice period", "termination for convenience", "deletion on termination",
-    ]
+    completed = [e["query"] for e in events if e["type"] == "search" and e["hits"] is not None]
+    assert completed == ["notice period", "termination for convenience", "deletion on termination"]
     assert len(events[-1]["searches"]) == 3
 
 
 async def test_the_search_loop_is_capped(conn, indexed, monkeypatch):
     script_model(monkeypatch, searches=["q"] * 50, tokens=["Done."])
     events = await collect(conn, indexed["space_id"], "?")
-    assert len([e for e in events if e["type"] == "search"]) == agent.settings.max_search_rounds
+    completed = [e for e in events if e["type"] == "search" and e["hits"] is not None]
+    assert len(completed) == agent.settings.max_search_rounds
+    assert events[-1]["type"] == "done", "after the cap it is forced to answer, tools withheld"
 
 
 async def test_citations_are_attributed_to_the_sentence_they_follow(conn, indexed, monkeypatch):
@@ -221,5 +231,5 @@ async def test_the_answer_prompt_forbids_answering_from_the_wrong_document():
     """Regression, found by the abstention eval: asked about one vendor's warranty with that
     vendor withheld, the agent cited eight other vendors' warranty clauses. Every quote
     verified, so the grounding gate could not catch it — only the prompt can."""
-    assert "different party, agreement or document" in agent.ANSWER_SYSTEM
-    assert "not an answer" in agent.ANSWER_SYSTEM
+    assert "different party, agreement or document" in agent.SYSTEM
+    assert "not an answer" in agent.SYSTEM

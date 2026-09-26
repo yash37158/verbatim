@@ -187,3 +187,58 @@ async def test_a_query_with_no_indexable_words_falls_back_to_the_dense_arm(conn,
     stub_query_vector(monkeypatch, emb(1, 0, 0))
     hits = await retrieval.search(conn, space["mine"], "the and of a")
     assert len(hits) == 1 and hits[0].kw_rank is None
+
+
+async def test_a_throttled_embedding_api_degrades_to_keyword_search_not_to_no_answer(
+    conn, space, add_document, monkeypatch
+):
+    """A rate limit on the embedding provider must not turn into 'no answer'. The keyword
+    arm needs no vectors, so search carries on with that alone."""
+    from google.genai.errors import ClientError
+
+    doc = await add_document(space["mine"])
+    await insert_chunk(conn, space["mine"], doc, 0,
+                       "Either party may terminate this Agreement upon thirty (30) days notice.",
+                       emb(1, 0, 0))
+
+    async def throttled(_text):
+        raise ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                                          "message": "quota"}})
+    monkeypatch.setattr(retrieval, "embed_query", throttled)
+
+    hits = await retrieval.search(conn, space["mine"], "terminate thirty days notice")
+    assert hits, "keyword search should still find it"
+    assert hits[0].sem_rank is None, "the dense arm had no query vector to work with"
+    assert hits[0].kw_rank == 1
+
+
+async def test_a_non_transient_embedding_error_still_raises(conn, space, monkeypatch):
+    """A 400 is a bug in our request, not a provider hiccup. Hiding it behind keyword search
+    would make it invisible."""
+    from google.genai.errors import ClientError
+
+    async def broken(_text):
+        raise ClientError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                          "message": "bad request"}})
+    monkeypatch.setattr(retrieval, "embed_query", broken)
+
+    with pytest.raises(ClientError):
+        await retrieval.search(conn, space["mine"], "anything")
+
+
+async def test_unembedded_chunks_are_found_by_keyword_and_skipped_by_the_dense_arm(
+    conn, space, add_document, monkeypatch
+):
+    """Chunks land before their vectors do. Until the vector arrives, wording finds them and
+    meaning does not — and neither arm errors on the NULL."""
+    doc = await add_document(space["mine"])
+    await conn.execute(
+        """insert into chunks (document_id, space_id, ordinal, page_start, page_end,
+                               char_start, char_end, text)
+           values ($1,$2,0,1,1,0,40,'Sub-processors require thirty days notice.')""",
+        doc, space["mine"],
+    )
+    stub_query_vector(monkeypatch, emb(1, 0, 0))
+    hits = await retrieval.search(conn, space["mine"], "sub-processors notice")
+    assert len(hits) == 1
+    assert hits[0].kw_rank == 1 and hits[0].sem_rank is None

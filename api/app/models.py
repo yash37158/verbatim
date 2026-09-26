@@ -16,3 +16,7 @@ class SpacePatch(BaseModel):
 class AskIn(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
     document_ids: list[UUID] | None = None
+
+
+class ConversationPatch(BaseModel):
+    title: str = Field(min_length=1, max_length=200)

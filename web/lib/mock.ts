@@ -1,6 +1,6 @@
 // In-memory stand-in for the FastAPI backend, so the UI is reviewable before M1.
 // Deleted wholesale once NEXT_PUBLIC_API_URL is set — nothing else imports it.
-import type { Citation, Doc, Space, StreamEvent } from "./types";
+import type { Citation, Conversation, Doc, Message, Space, StreamEvent } from "./types";
 
 const MSA = "d_msa";
 const DPA = "d_dpa";
@@ -52,6 +52,9 @@ export const docs: Record<string, Doc[]> = {
     { id: "d_h1", space_id: "s_handbook", filename: "Handbook-2026.pdf", size_bytes: 1_100_000, page_count: 64, status: "ready" },
   ],
 };
+
+function GROUNDED_TEXT() { return GROUNDED.text; }
+function GROUNDED_CITES() { return GROUNDED.citations; }
 
 export const GROUNDED: { text: string; citations: Citation[] } = {
   text:
@@ -108,6 +111,57 @@ export const ABSTAINED: { text: string; citations: Citation[] } = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Conversations and their messages, so the history UI is reviewable without a backend.
+const conversations: Record<string, Conversation[]> = {
+  s_contracts: [
+    { id: "c_1", title: "What are the termination terms?", created_at: "2026-09-21T16:30:00Z",
+      last_message_at: "2026-09-21T16:40:00Z", message_count: 2 },
+    { id: "c_2", title: "Sub-processor notice period", created_at: "2026-09-20T09:00:00Z",
+      last_message_at: "2026-09-20T09:05:00Z", message_count: 2 },
+  ],
+};
+const messages: Record<string, Message[]> = {
+  c_1: [
+    { id: "m_1", role: "user", content: "What are the termination terms?", citations: [] },
+    { id: "m_2", role: "assistant", content: GROUNDED_TEXT(), citations: GROUNDED_CITES(),
+      searches: [{ query: "termination for convenience notice", hits: 8 }] },
+  ],
+  c_2: [
+    { id: "m_3", role: "user", content: "How much notice before adding a sub-processor?", citations: [] },
+    { id: "m_4", role: "assistant",
+      content: "I couldn't find a sub-processor clause in these documents.", citations: [],
+      searches: [{ query: "sub-processor notice", hits: 3 }], abstained: true },
+  ],
+};
+
+export function listConversations(spaceId: string): Conversation[] {
+  return [...(conversations[spaceId] ?? [])].sort((a, b) =>
+    b.last_message_at.localeCompare(a.last_message_at));
+}
+export function listMessages(conversationId: string): Message[] {
+  return messages[conversationId] ?? [];
+}
+export function createConversation(spaceId: string): Conversation {
+  const c: Conversation = { id: `c_${Math.random().toString(36).slice(2, 8)}`, title: null,
+    created_at: new Date().toISOString(), last_message_at: new Date().toISOString(), message_count: 0 };
+  (conversations[spaceId] ??= []).unshift(c);
+  messages[c.id] = [];
+  return c;
+}
+export function renameConversation(id: string, title: string): Conversation {
+  const c = Object.values(conversations).flat().find((x) => x.id === id);
+  if (!c) throw new Error("Conversation not found");
+  c.title = title;
+  return c;
+}
+export function deleteConversation(id: string): void {
+  for (const list of Object.values(conversations)) {
+    const i = list.findIndex((x) => x.id === id);
+    if (i >= 0) list.splice(i, 1);
+  }
+  delete messages[id];
+}
+
 /**
  * Mock create and upload mutate the same stores `listSpaces` and `listDocuments` read, and
  * the upload advances its own status on a timer. The UI then polls identically in both
@@ -156,12 +210,32 @@ export function uploadDocument(spaceId: string, file: File): Doc {
   return doc;
 }
 
-export async function* streamMockAnswer(question: string): AsyncGenerator<StreamEvent> {
+export async function* streamMockAnswer(
+  question: string, conversationId?: string,
+): AsyncGenerator<StreamEvent> {
   const unanswerable = /\b(price|pricing|cost|fee|rate card|how much)\b/i.test(question);
   const answer = unanswerable ? ABSTAINED : GROUNDED;
   const started = Date.now();
+  const query = question.toLowerCase().replace(/[?.]/g, "").split(" ").slice(0, 4).join(" ");
 
-  await sleep(420); // retrieval + rerank, as the real pipeline would feel
+  yield { type: "search", query, hits: null };
+  await sleep(420); // retrieval, as the real pipeline would feel
+  yield { type: "search", query, hits: unanswerable ? 3 : 8 };
+
+  // Persist into the mock history so switching conversations shows it, like the real API.
+  if (conversationId) {
+    const c = Object.values(conversations).flat().find((x) => x.id === conversationId);
+    if (c) {
+      c.title ??= question.slice(0, 80);
+      c.last_message_at = new Date().toISOString();
+      c.message_count += 2;
+    }
+    (messages[conversationId] ??= []).push(
+      { id: `m_${Date.now()}u`, role: "user", content: question, citations: [] },
+      { id: `m_${Date.now()}a`, role: "assistant", content: answer.text, citations: answer.citations,
+        searches: [{ query, hits: unanswerable ? 3 : 8 }], abstained: unanswerable },
+    );
+  }
 
   let sentence = 0;
   const sent = new Set<string>();

@@ -19,7 +19,7 @@ from .agent import answer
 from .gemini import friendly_error
 from .config import settings
 from .db import acquire, connect, disconnect
-from .models import AskIn, SpaceIn, SpacePatch
+from .models import AskIn, ConversationPatch, SpaceIn, SpacePatch
 
 log = logging.getLogger("verbatim")
 
@@ -321,7 +321,10 @@ def _space_json(r):
 async def list_documents(space_id: UUID, conn=Depends(db), user=Depends(current_user)):
     await owned_space(space_id, conn, user)
     rows = await conn.fetch(
-        """select d.*, (select count(*) from chunks c where c.document_id = d.id) as indexed
+        """select d.*,
+                  (select count(*) from chunks c where c.document_id = d.id) as total,
+                  (select count(*) from chunks c where c.document_id = d.id
+                                                   and c.embedding is not null) as indexed
              from documents d where d.space_id = $1 order by d.created_at""",
         space_id,
     )
@@ -368,10 +371,19 @@ async def retry_document(document_id: UUID, conn=Depends(db), user=Depends(curre
     a provider wait that has since cleared. Refused only while it is already in flight.
     """
     doc = await owned_document(document_id, conn, user)
-    if doc["status"] in ("parsing", "embedding"):
+    if doc["status"] == "parsing":
         raise HTTPException(409, "Already being ingested")
-    if doc["status"] == "ready":
+    if doc["status"] == "ready" and doc["retry_after"] is None:
+        # Nothing to retry: it is not failed and it is not waiting on anything.
         raise HTTPException(409, "Already ingested")
+    if doc["status"] == "ready":
+        # Waiting out a rate-limit window on embedding. Clear the wait and let the backfill
+        # worker have another go; the document was never taken offline.
+        row = await conn.fetchrow(
+            "update documents set retry_after = null, error = null where id = $1 returning *",
+            doc["id"],
+        )
+        return _document_json(row)
     row = await conn.fetchrow(
         """update documents
               set status = 'queued', attempts = 0, error = null, retry_after = null
@@ -408,8 +420,11 @@ def _document_json(r):
         # When the worker will pick it up again. The UI renders it in the viewer's timezone,
         # because "it will retry" without a time reads as "it is stuck".
         "retry_after": r["retry_after"].isoformat() if r.get("retry_after") else None,
-        # Embedding is resumable, so a document waiting on quota has usually banked real
-        # progress. Without this, "Queued" looks identical to "stuck".
+        # A document is searchable by keyword the moment its chunks land, and by meaning as
+        # each vector is filled in. Both counts, so the UI can say "ready · semantic 34/91"
+        # rather than making the user wait for a bar that has nothing to do with whether
+        # they can ask a question.
+        "total_chunks": r["total"] if "total" in r.keys() else None,
         "indexed_chunks": r["indexed"] if "indexed" in r.keys() else None,
     }
 
@@ -448,12 +463,19 @@ async def get_chunk(chunk_id: UUID, conn=Depends(db), user=Depends(current_user)
 async def list_conversations(space_id: UUID, conn=Depends(db), user=Depends(current_user)):
     await owned_space(space_id, conn, user)
     rows = await conn.fetch(
-        "select id, title, created_at from conversations where space_id = $1 "
-        "order by created_at desc",
+        """select c.id, c.title, c.created_at,
+                  coalesce((select max(m.created_at) from messages m where m.conversation_id = c.id),
+                           c.created_at) as last_message_at,
+                  (select count(*) from messages m where m.conversation_id = c.id) as message_count
+             from conversations c
+            where c.space_id = $1
+            order by last_message_at desc""",
         space_id,
     )
     return [{"id": str(r["id"]), "title": r["title"],
-             "created_at": r["created_at"].isoformat()} for r in rows]
+             "created_at": r["created_at"].isoformat(),
+             "last_message_at": r["last_message_at"].isoformat(),
+             "message_count": r["message_count"]} for r in rows]
 
 
 @app.post("/api/spaces/{space_id}/conversations", status_code=201)
@@ -472,7 +494,26 @@ async def list_messages(conversation_id: UUID, conn=Depends(db), user=Depends(cu
         "select * from messages where conversation_id = $1 order by created_at", conversation_id
     )
     return [{"id": str(r["id"]), "role": r["role"], "content": r["content"],
-             "citations": r["citations"]} for r in rows]
+             "citations": r["citations"], "searches": r["searches"],
+             "created_at": r["created_at"].isoformat()} for r in rows]
+
+
+@app.patch("/api/conversations/{conversation_id}")
+async def rename_conversation(
+    conversation_id: UUID, body: ConversationPatch, conn=Depends(db), user=Depends(current_user)
+):
+    await owned_conversation(conversation_id, conn, user)
+    row = await conn.fetchrow(
+        "update conversations set title = $2 where id = $1 returning id, title, created_at",
+        conversation_id, body.title.strip(),
+    )
+    return {"id": str(row["id"]), "title": row["title"], "created_at": row["created_at"].isoformat()}
+
+
+@app.delete("/api/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(conversation_id: UUID, conn=Depends(db), user=Depends(current_user)):
+    await owned_conversation(conversation_id, conn, user)
+    await conn.execute("delete from conversations where id = $1", conversation_id)  # messages cascade
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
