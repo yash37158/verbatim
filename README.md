@@ -130,8 +130,13 @@ uv run uvicorn app.main:app --reload --port 8000
 cd web
 npm install
 cp .env.example .env.local
-npm run dev
+npm run dev          # or: npm run build && npm start
 ```
+
+> `npm run dev` compiles each route the first time it is visited, so the first click on a
+> page can take several seconds. That is the dev server, not the app — the API answers in
+> 5–20 ms. For testing rather than editing, `npm run build && npm start` serves the same
+> pages in 10–110 ms.
 
 Open **http://localhost:3000**.
 

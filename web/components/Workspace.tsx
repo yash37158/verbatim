@@ -38,7 +38,11 @@ export function Workspace({
   const searchParams = useSearchParams();
   const [docs, setDocs] = useState(documents);
   const [conversations, setConversations] = useState(initialConversations);
-  const [active, setActive] = useState<{ id: string | null; messages: Message[] }>({
+  // `key` is which thread the pane is showing; `id` is that thread's row once it exists.
+  // They are separate because the first question *creates* the row — keying the pane on
+  // the id would remount it mid-answer and throw the reply away.
+  const [active, setActive] = useState<{ key: string; id: string | null; messages: Message[] }>({
+    key: activeConversation?.id ?? "new",
     id: activeConversation?.id ?? null,
     messages: initialMessages,
   });
@@ -56,7 +60,7 @@ export function Workspace({
     try {
       const messages = await listMessages(id);
       setCitation(null); // a source panel from the thread being left should not linger
-      setActive({ id, messages });
+      setActive({ key: id, id, messages });
       setUrl(id);
     } catch {
       // The list refresh below will drop it if it is gone.
@@ -66,12 +70,16 @@ export function Workspace({
 
   function newChat() {
     setCitation(null);
-    setActive({ id: null, messages: [] });
+    // A fresh key, so an unsent draft or a half-streamed answer in the old thread is
+    // discarded rather than bleeding into this one.
+    setActive({ key: `new-${Date.now()}`, id: null, messages: [] });
     setUrl(null);
   }
 
   function conversationCreated(c: Conversation) {
     setConversations((list) => [c, ...list]);
+    // Only the id changes. The key stays put, so the pane keeps streaming the answer that
+    // caused this conversation to be created in the first place.
     setActive((a) => ({ ...a, id: c.id }));
     setUrl(c.id);
   }
@@ -242,9 +250,9 @@ export function Workspace({
       )}
 
       <ChatPane
-        // Keyed on the conversation: switching remounts the pane with that thread's
-        // messages, which is simpler and safer than resetting state inside it.
-        key={active.id ?? "new"}
+        // Keyed on the thread, not its id: switching remounts with that thread's messages,
+        // while creating a conversation mid-answer does not.
+        key={active.key}
         spaceId={space.id}
         spaceName={space.name}
         selectedIds={[...selected]}

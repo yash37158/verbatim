@@ -187,11 +187,19 @@ can only ever show the current one. Every past answer is unreachable.
 - [x] The list is ordered by last activity and carries a message count
 - [ ] Cross-tab deletion visibility — deferred; the list refreshes on navigation, not on a poll
 
-**Known rough edge, found while verifying.** The model sometimes answers with markdown
-bullets, and `AnswerText`'s inline formatter only handles bold and code — so a leading `*`
-renders literally. Not F5, and not trivial to fix well: citations are placed by sentence
-index, and bullets and sentence splitting interact. Worth its own small change rather than
-a patch dropped in here.
+**Fixed 2026-09-27: the pane was remounting mid-answer.** `ChatPane` was keyed on the
+conversation id, and the *first question is what creates the conversation* — so the id went
+from null to a real value mid-stream, remounting the pane and discarding the answer as it
+arrived. The thread key and the row id are now separate: switching threads changes the key,
+creating a row does not.
+
+**Fixed 2026-09-27: markdown bullets, and a citation-placement hazard behind them.**
+`AnswerText` now renders lists, headings, bold and italic as blocks. The interesting part
+was not the markdown — it was that chips used to be positioned with `Intl.Segmenter`, while
+the server numbers them by counting `[.!?]` followed by whitespace. Those two mostly agree,
+and when they disagree a chip lands on the *wrong claim* with no error anywhere. The client
+now counts exactly the way the server counts. `lib/answer-layout.test.ts` pins the rule,
+including the abbreviation case where agreement matters more than linguistic correctness.
 
 **Design.** `ChatPane` is keyed on the active conversation id, so switching threads
 remounts it with the right messages. That is simpler and safer than resetting a dozen

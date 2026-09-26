@@ -10,17 +10,21 @@ export default async function SpacePage({
   searchParams: Promise<{ c?: string }>;
 }) {
   const [{ id }, { c }] = await Promise.all([params, searchParams]);
-  const [space, documents, conversations] = await Promise.all([
+  // All four in one round, including the deep-linked conversation's messages: `?c=` is
+  // enough to fetch them, so there is no reason to wait for the conversations list first.
+  // Preloading here rather than after mount means a reload restores the thread with no
+  // flash of empty state.
+  const [space, documents, conversations, messages] = await Promise.all([
     getSpace(id),
     listDocuments(id),
     listConversations(id),
+    c ? listMessages(c).catch(() => []) : Promise.resolve([]),
   ]);
   if (!space) notFound();
 
-  // `?c=` deep-links a conversation. Preloading its messages here, rather than in the
-  // browser after mount, means a reload restores the thread with no flash of empty state.
+  // Only honour `?c=` if it really belongs to this Space.
   const active = conversations.find((x) => x.id === c) ?? null;
-  const initialMessages = active ? await listMessages(active.id) : [];
+  const initialMessages = active ? messages : [];
 
   return (
     <Workspace
