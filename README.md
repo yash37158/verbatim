@@ -257,6 +257,7 @@ the spec.
 | **[api/README.md](api/README.md)** | How the pipeline works, limits, evals, known gaps |
 | **[FRONTEND.md](FRONTEND.md)** | Frontend delivery plan with acceptance criteria |
 | **[GOOGLE_SETUP.md](GOOGLE_SETUP.md)** | Enabling Google sign-in |
+| **[DEPLOYMENT.md](DEPLOYMENT.md)** | Hosting it for free — providers, what must change first, and what to lock down before it is public |
 
 ## Stack
 
